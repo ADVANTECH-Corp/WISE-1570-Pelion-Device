@@ -1,0 +1,3 @@
+#!/bin/bash
+
+mbed compile -t GCC_ARM -m MTB_ADV_WISE_1570 -DSENSOR_HDC1050 -DWISE_1570_CONSOLE $1

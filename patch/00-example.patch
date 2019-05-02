@@ -1,0 +1,239 @@
+diff -Naur a/mbed-os/platform/mbed_retarget.cpp b/mbed-os/platform/mbed_retarget.cpp
+--- a/mbed-os/platform/mbed_retarget.cpp	2019-03-18 17:22:09.380093330 +0800
++++ b/mbed-os/platform/mbed_retarget.cpp	2019-03-18 17:23:27.318924829 +0800
+@@ -1188,6 +1188,42 @@
+ // SP.  This make it compatible with RTX RTOS thread stacks.
+ #if defined(TOOLCHAIN_GCC_ARM) || defined(TOOLCHAIN_GCC_CR)
+ 
++#if defined(MBED_SPLIT_HEAP)
++
++extern uint32_t __mbed_sbrk_start;
++extern uint32_t __mbed_krbs_start;
++extern uint32_t __mbed_sbrk_start_0;
++extern uint32_t __mbed_krbs_start_0;
++
++extern "C" WEAK caddr_t _sbrk(int incr)
++{
++    static uint32_t heap = (uint32_t) &__mbed_sbrk_start_0;
++    static bool once = true;
++    uint32_t prev_heap = heap;
++    uint32_t new_heap = heap + incr;
++
++    /**
++     * If the new address is outside the first region, start allocating from the second region.
++     */
++    if (once && (new_heap > (uint32_t) &__mbed_krbs_start_0)) {
++        once = false;
++        prev_heap = (uint32_t) &__mbed_sbrk_start;
++        new_heap = prev_heap + incr;
++    } else if (new_heap > (uint32_t) &__mbed_krbs_start) {
++        /**
++        * If the new address is outside the second region, return out-of-memory.
++        */
++        errno = ENOMEM;
++        return (caddr_t) - 1;
++    }
++
++    heap = new_heap;
++    return (caddr_t) prev_heap;
++}
++
++#else //defined(MBED_SPLIT_HEAP)
++
++
+ #if defined(TARGET_CORTEX_A)
+ extern "C" uint32_t  __HeapLimit;
+ #endif
+@@ -1236,6 +1272,8 @@
+     return (caddr_t) prev_heap;
+ }
+ #endif
++
++#endif //defined(MBED_SPLIT_HEAP)
+ #endif
+ 
+ #if defined(TOOLCHAIN_GCC_ARM) || defined(TOOLCHAIN_GCC_CR)
+diff -Naur a/mbed-os/targets/targets.json b/mbed-os/targets/targets.json
+--- a/mbed-os/targets/targets.json	2019-03-18 17:22:10.492076677 +0800
++++ b/mbed-os/targets/targets.json	2019-03-19 09:20:30.555757575 +0800
+@@ -3373,7 +3373,8 @@
+         "macros_add": [
+             "MBEDTLS_CONFIG_HW_SUPPORT",
+             "WISE_1570",
+-            "TWO_RAM_REGIONS"
++            "TWO_RAM_REGIONS",
++            "MBED_SPLIT_HEAP"
+         ],
+         "device_has_add": [
+             "ANALOGOUT",
+diff -Naur a/mbed-os/targets/TARGET_STM/TARGET_STM32L4/TARGET_STM32L486xG/device/TOOLCHAIN_GCC_ARM/STM32L486XX.ld b/mbed-os/targets/TARGET_STM/TARGET_STM32L4/TARGET_STM32L486xG/device/TOOLCHAIN_GCC_ARM/STM32L486XX.ld
+--- a/mbed-os/targets/TARGET_STM/TARGET_STM32L4/TARGET_STM32L486xG/device/TOOLCHAIN_GCC_ARM/STM32L486XX.ld	2019-03-18 17:22:10.240080451 +0800
++++ b/mbed-os/targets/TARGET_STM/TARGET_STM32L4/TARGET_STM32L486xG/device/TOOLCHAIN_GCC_ARM/STM32L486XX.ld	2019-03-18 17:24:31.757956914 +0800
+@@ -6,10 +6,18 @@
+   #define MBED_APP_SIZE 1024k
+ #endif
+ 
++M_CRASH_DATA_RAM_SIZE = 0x100;
++
++#if !defined(MBED_BOOT_STACK_SIZE)
++    #define MBED_BOOT_STACK_SIZE 0x400
++#endif
++
++STACK_SIZE = MBED_BOOT_STACK_SIZE;
++
+ /* Linker script to configure memory regions. */
+ MEMORY
+ {
+-  FLASH (rx) : ORIGIN = MBED_APP_START, LENGTH = MBED_APP_SIZE
++  FLASH (rx)   : ORIGIN = MBED_APP_START, LENGTH = MBED_APP_SIZE
+   SRAM2 (rwx)  : ORIGIN = 0x10000188, LENGTH = 32k - 0x188
+   SRAM1 (rwx)  : ORIGIN = 0x20000000, LENGTH = 96k
+ }
+@@ -86,6 +94,47 @@
+     __etext = .;
+     _sidata = .;
+ 
++    .crash_data_ram :
++    {
++        . = ALIGN(8);
++        __CRASH_DATA_RAM__ = .;
++        __CRASH_DATA_RAM_START__ = .; /* Create a global symbol at data start */
++        KEEP(*(.keep.crash_data_ram))
++        *(.m_crash_data_ram)     /* This is a user defined section */
++        . += M_CRASH_DATA_RAM_SIZE;
++        . = ALIGN(8);
++        __CRASH_DATA_RAM_END__ = .; /* Define a global symbol at data end */
++    } > SRAM2
++
++    /* .stack section doesn't contains any symbols. It is only
++     * used for linker to reserve space for the isr stack section
++     * WARNING: .stack should come immediately after the last secure memory
++     * section.  This provides stack overflow detection. */
++    .stack (NOLOAD):
++    {
++        __StackLimit = .;
++        *(.stack*);
++        . += STACK_SIZE - (. - __StackLimit);
++    } > SRAM2
++
++    /* Set stack top to end of RAM, and stack limit move down by
++     * size of stack_dummy section */
++    __StackTop = ADDR(.stack) + SIZEOF(.stack);
++    _estack = __StackTop;
++    __StackLimit = ADDR(.stack);
++    PROVIDE(__stack = __StackTop);
++
++    /* Place holder for additional heap */
++    .heap_0 (COPY):
++    {
++        __mbed_sbrk_start_0 = .;
++        . += (ORIGIN(SRAM2) + LENGTH(SRAM2) - .);
++        __mbed_krbs_start_0 = .;
++    } > SRAM2
++
++    /* Check if heap exceeds SRAM2 */
++    ASSERT(__mbed_krbs_start_0 <= (ORIGIN(SRAM2)+LENGTH(SRAM2)), "Heap is too big for SRAM2")
++
+     .data : AT (__etext)
+     {
+         __data_start__ = .;
+@@ -106,7 +155,6 @@
+         KEEP(*(.init_array))
+         PROVIDE_HIDDEN (__init_array_end = .);
+ 
+-
+         . = ALIGN(8);
+         /* finit data */
+         PROVIDE_HIDDEN (__fini_array_start = .);
+@@ -122,6 +170,9 @@
+ 
+     } > SRAM1
+ 
++    /* Check if bss exceeds SRAM1 */
++    ASSERT(__data_end__ <= (ORIGIN(SRAM1)+LENGTH(SRAM1)), ".data is too big for SRAM1")
++
+     .bss :
+     {
+         . = ALIGN(8);
+@@ -134,34 +185,21 @@
+         _ebss = .;
+     } > SRAM1
+ 
++    /* Check if bss exceeds SRAM1 */
++    ASSERT(__bss_end__ <= (ORIGIN(SRAM1)+LENGTH(SRAM1)), "BSS is too big for SRAM1")
++
++    /* Placeholder for default single heap */
+     .heap (COPY):
+     {
+         __end__ = .;
+         end = __end__;
++        __mbed_sbrk_start = .;
+         *(.heap*)
+         . += (ORIGIN(SRAM1) + LENGTH(SRAM1) - .);
++        __mbed_krbs_start = .;
+         __HeapLimit = .;
+     } > SRAM1
+-    PROVIDE(__heap_size = SIZEOF(.heap));
+-    PROVIDE(__mbed_sbrk_start = ADDR(.heap));
+-    PROVIDE(__mbed_krbs_start = ADDR(.heap) + SIZEOF(.heap));
+-    /* Check if data + heap exceeds RAM1 limit */
+-    ASSERT((ORIGIN(SRAM1)+LENGTH(SRAM1)) >= __HeapLimit, "SRAM1 overflow")
+-    /* .stack_dummy section doesn't contains any symbols. It is only
+-     * used for linker to calculate size of stack sections, and assign
+-     * values to stack symbols later */
+-    .stack_dummy (COPY):
+-    {
+-        *(.stack*)
+-    } > SRAM2
+-
+-    /* Set stack top to end of RAM, and stack limit move down by
+-     * size of stack_dummy section */
+-    __StackTop = ORIGIN(SRAM2) + LENGTH(SRAM2);
+-    _estack = __StackTop;
+-    __StackLimit = __StackTop - SIZEOF(.stack_dummy);
+-    PROVIDE(__stack = __StackTop);
+-    /* Check if stack exceeds RAM2 limit */
+-    ASSERT((ORIGIN(SRAM2)+LENGTH(SRAM2)) >= __StackLimit, "SRAM2 overflow")
+ 
++    /* Check if heap exceeds SRAM1 */
++    ASSERT(__HeapLimit <= (ORIGIN(SRAM1)+LENGTH(SRAM1)), "Heap is too big for SRAM1")
+ }
+diff -Naur a/simple-mbed-cloud-client/mbed_lib.json b/simple-mbed-cloud-client/mbed_lib.json
+--- a/simple-mbed-cloud-client/mbed_lib.json	2019-03-18 17:22:03.924175030 +0800
++++ b/simple-mbed-cloud-client/mbed_lib.json	2019-03-19 09:38:27.202937490 +0800
+@@ -1,6 +1,16 @@
+ {
+     "name": "client_app",
+     "config": {
++        "flash-start-address": {
++            "help": "Start address of internal flash. Only used in this config to help the definition of other macros.",
++            "macro_name": "MBED_CONF_APP_FLASH_START_ADDRESS",
++            "value": null
++        },
++        "flash-size": {
++            "help": "Total size of internal flash. Only used in this config to help the definition of other macros.",
++            "macro_name": "MBED_CONF_APP_FLASH_SIZE",
++            "value": null
++        },
+         "partition_mode": {
+             "help": "Macro for single or dual partition mode. This is supposed to be used with storage storage for data e.g. SD card. This enabled by default.",
+             "macro_name": "MCC_PLATFORM_PARTITION_MODE"
+@@ -21,6 +31,11 @@
+             "help": "Optional macro SECONDARY_PARTITION_SIZE in bytes, deault is 1GB. This requires auto_partition to be enabled.",
+             "macro_name": "SECONDARY_PARTITION_SIZE"
+         },
++        "sotp-num-sections": {
++            "help": "Number of SOTP sections",
++            "macro_name": "PAL_INT_FLASH_NUM_SECTIONS",
++            "value": 2
++        },
+         "pal_dtls_peer_min_timeout": {
+             "help": "pal_dtls_peer_min_timeout",
+             "macro_name": "PAL_DTLS_PEER_MIN_TIMEOUT",
+@@ -57,4 +72,4 @@
+             "value": "\"sotp_fs_config_MbedOS.h\""
+         }
+     }
+-}
+\ No newline at end of file
++}
