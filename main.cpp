@@ -334,12 +334,13 @@ void vPdmcThread(void)
 
         //
         // Registration update to mbed cloud periodically (MINUTE_UPDATE_REGISTRATION)
-        //        
+        //
+#if 0  
         if((g_iSubscribeTemperature == 0) && (g_iSubscribeHumidity == 0) && (count % uiRegUpdateMod == 0) && (count != 0)) {
             printf("### Registration update to mbed cloud after time: %ds\n", (count * MS_SCHEDULE_TIME)/1000);
             client.register_update();
         }
-        
+#endif   
         wait_ms(MS_SCHEDULE_TIME);
         count++;    
     }
