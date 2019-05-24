@@ -39,12 +39,11 @@
 #include "CellularDevice.h"
 #include "CellularNetwork.h"
 
-#define SW_VERSION "1570S00MMX010001"
+#define SW_VERSION "1570S00MMX010002"
 
 //#define OTA_TEST 1
 #define MS_SCHEDULE_TIME 30
 #define SECOND_UPDATE_SENSOR_TIME 30
-#define MINUTE_UPDATE_REGISTRATION 1
 #if defined(OTA_TEST)
 #define DISPLAY_TITLE "PDMC (OTA)"
 #else
@@ -214,7 +213,7 @@ void vPdmcThread(void)
     nsapi_error_t status;
     int client_status;
     unsigned int count = 0;
-    unsigned int uiMod, uiRegUpdateMod;
+    unsigned int uiMod;
 #if defined(SENSOR_HDC1050)
     float fTemperature = 0;
     uint16_t u16Humidity = 0;
@@ -313,7 +312,6 @@ void vPdmcThread(void)
 
 
     uiMod = SECOND_UPDATE_SENSOR_TIME * 1000 / MS_SCHEDULE_TIME;
-    uiRegUpdateMod = MINUTE_UPDATE_REGISTRATION * 60 * 1000 / MS_SCHEDULE_TIME;
     while (client.is_register_called()) 
     {
         if(count % uiMod == 0 && client.is_client_registered()) {
@@ -332,15 +330,6 @@ void vPdmcThread(void)
 #endif // SENSOR_HDC1050
         }
 
-        //
-        // Registration update to mbed cloud periodically (MINUTE_UPDATE_REGISTRATION)
-        //
-#if 0  
-        if((g_iSubscribeTemperature == 0) && (g_iSubscribeHumidity == 0) && (count % uiRegUpdateMod == 0) && (count != 0)) {
-            printf("### Registration update to mbed cloud after time: %ds\n", (count * MS_SCHEDULE_TIME)/1000);
-            client.register_update();
-        }
-#endif   
         wait_ms(MS_SCHEDULE_TIME);
         count++;    
     }
